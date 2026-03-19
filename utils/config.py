@@ -20,3 +20,7 @@ USE_O_DIRECT: bool = True
 def set_o_direct(enabled: bool) -> None:
     global USE_O_DIRECT
     USE_O_DIRECT = enabled
+
+
+def get_o_direct() -> bool:
+    return USE_O_DIRECT

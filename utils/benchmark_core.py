@@ -4,7 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from utils.checkpoints_utils import save_incremental_results, load_existing_results, check_config_match, get_completed_tests
 from backends.cpp_backend import set_thread_count_cpp
-from utils.config import PYTHON_BACKENDS, CLUSTER, STORAGE_PATH
+from utils.config import PYTHON_BACKENDS, CLUSTER, STORAGE_PATH, get_o_direct
 import torch
 from backends.cpp_backend import cpp_write_blocks, cpp_read_blocks
 from backends.aiofiles_backend import aiofiles_write_blocks, aiofiles_read_blocks
@@ -27,7 +27,8 @@ def create_benchmark_config(buffer_size, iterations, threads_counts, block_sizes
         'threads_counts': threads_counts,
         'block_sizes_mb': block_sizes_mb,
         'file_system': f'{STORAGE_PATH} ({"tmpfs" if STORAGE_PATH == "/dev/shm" else "persistent storage"})',
-        'implementation': implementation
+        'implementation': implementation,
+        'o_direct': get_o_direct(),
     }
     config.update(kwargs)
     return config
