@@ -1,9 +1,21 @@
 from typing import Any
 import torch
-from nixl._api import nixl_agent, nixl_agent_config
+from nixl_cu13._api import nixl_agent, nixl_agent_config
 import os
 import numpy as np
 import time
+import utils.config as config
+
+_O_DIRECT_FLAG = getattr(os, 'O_DIRECT', 0)
+
+
+def _open_o_direct(path: str, flags: int, mode: int = 0o644) -> int:
+    if config.USE_O_DIRECT and _O_DIRECT_FLAG:
+        try:
+            return os.open(path, flags | _O_DIRECT_FLAG, mode)
+        except OSError:
+            pass
+    return os.open(path, flags, mode)
 
 # Storage path configuration - can be overridden by STORAGE_PATH environment variable
 STORAGE_PATH = os.environ.get('STORAGE_PATH', '/dev/shm')
@@ -85,7 +97,7 @@ def nixl_write_blocks(block_size, buffer, blocks_indices, file_names):
             # Write to temporary file first
             temp_fname = f"{STORAGE_PATH}/temp_block_{idx}.bin"
             temp_files.append((temp_fname, fname))
-            fd = os.open(temp_fname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            fd = _open_o_direct(temp_fname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
             open_fds.append(fd)
 
             # Local: DRAM block. Format: (addr, len, devID, metadata_handle)
@@ -162,7 +174,7 @@ def nixl_read_blocks(block_size, buffer, block_indices: list, file_names: list):
 
     try:
         for idx, fname in zip(block_indices, file_names):
-            fd = os.open(fname, os.O_RDONLY )
+            fd = _open_o_direct(fname, os.O_RDONLY)
             open_fds.append(fd)
 
             # Local: Destination block in CPU buffer

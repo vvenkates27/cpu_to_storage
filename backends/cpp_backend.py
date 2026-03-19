@@ -1,4 +1,6 @@
 import time
+import utils.config as config
+
 CPP_AVAILABLE = False
 try:
     import cpp_ext
@@ -7,8 +9,14 @@ except ImportError as e:
     print(f"Warning: C++ extension not available: {e}")
     print("Run 'python setup.py build_ext --inplace' to build it")
 
+
 def set_thread_count_cpp(num_threads):
     cpp_ext.set_thread_count(num_threads)
+
+
+def set_o_direct_cpp(enabled: bool) -> None:
+    if CPP_AVAILABLE:
+        cpp_ext.set_o_direct(enabled)
 
 
 async def cpp_write_blocks(block_size, buffer, block_indices, dest_files):

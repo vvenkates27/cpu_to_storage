@@ -2,10 +2,23 @@ import os
 import asyncio
 import time
 from typing import Any
+import utils.config as config
 
 
 # Storage path configuration - can be overridden by STORAGE_PATH environment variable
 STORAGE_PATH = os.environ.get('STORAGE_PATH', '/dev/shm')
+
+_O_DIRECT_FLAG = getattr(os, 'O_DIRECT', 0)
+
+
+def _open_o_direct(path: str, flags: int, mode: int = 0o644) -> int:
+    if config.USE_O_DIRECT and _O_DIRECT_FLAG:
+        try:
+            return os.open(path, flags | _O_DIRECT_FLAG, mode)
+        except OSError:
+            pass
+    return os.open(path, flags, mode)
+
 
 def read_block_direct(fd, buffer_view_slice):
     try:
@@ -21,7 +34,7 @@ async def python_self_read_blocks(block_size, view, block_indices, dest_files):
     start = time.perf_counter()
 
     # Pre-open all files
-    fds: list[int] = [os.open(fn, os.O_RDONLY) for fn in dest_files]
+    fds: list[int] = [_open_o_direct(fn, os.O_RDONLY) for fn in dest_files]
 
     tasks = [
         loop.run_in_executor(
@@ -57,7 +70,7 @@ async def python_self_write_blocks(block_size, view, block_indices, dest_files):
     start = time.perf_counter()
 
     temp_names = [f"{STORAGE_PATH}/temp_block_{i}.bin" for i in block_indices]
-    fds = [os.open(temp_name, os.O_CREAT | os.O_WRONLY | os.O_TRUNC) for temp_name in temp_names]
+    fds = [_open_o_direct(temp_name, os.O_CREAT | os.O_WRONLY | os.O_TRUNC) for temp_name in temp_names]
 
     tasks = [
         loop.run_in_executor(

@@ -1,10 +1,22 @@
 """File utility functions for benchmark operations."""
 
 import os
+import utils.config as config
 from utils.config import STORAGE_PATH
 from typing import Any
 import time
 import asyncio
+
+_O_DIRECT_FLAG = getattr(os, 'O_DIRECT', 0)
+
+
+def _open_o_direct(path: str, flags: int, mode: int = 0o644) -> int:
+    if config.USE_O_DIRECT and _O_DIRECT_FLAG:
+        try:
+            return os.open(path, flags | _O_DIRECT_FLAG, mode)
+        except OSError:
+            pass
+    return os.open(path, flags, mode)
 
 def generate_dest_file_names(name, num_files):
     return [f"{STORAGE_PATH}/{name}_{j}.bin" for j in range(num_files)]
@@ -73,7 +85,7 @@ async def write_blocks(block_size, view, block_indices, dest_files):
     start = time.perf_counter()
 
     # Open files directly in their destination location
-    fds = [os.open(dest_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC) for dest_file in dest_files]
+    fds = [_open_o_direct(dest_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC) for dest_file in dest_files]
 
     tasks = [
         loop.run_in_executor(

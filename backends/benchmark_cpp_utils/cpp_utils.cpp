@@ -20,7 +20,18 @@ namespace fs = std::filesystem;
 
 // Read block_size bytes from path into buffer_ptr using pread().
 static bool pread_file(const std::string& path, uint8_t* buffer_ptr, size_t block_size) {
+#ifdef O_DIRECT
+  int fd = -1;
+  if (g_use_o_direct) {
+    fd = open(path.c_str(), O_RDONLY | O_DIRECT);
+    if (fd < 0 && errno == EINVAL)
+      fd = open(path.c_str(), O_RDONLY);
+  } else {
+    fd = open(path.c_str(), O_RDONLY);
+  }
+#else
   int fd = open(path.c_str(), O_RDONLY);
+#endif
   if (fd < 0) {
     std::cerr << "[ERROR] Failed to open file: " << path
               << " - " << std::strerror(errno) << "\n";
@@ -47,6 +58,17 @@ static bool pread_file(const std::string& path, uint8_t* buffer_ptr, size_t bloc
   }
   close(fd);
   return true;
+}
+
+// Global O_DIRECT flag (can be toggled at runtime)
+static bool g_use_o_direct = true;
+
+void set_o_direct(bool enabled) {
+  g_use_o_direct = enabled;
+}
+
+bool get_o_direct() {
+  return g_use_o_direct;
 }
 
 // Global thread pool configuration
@@ -187,7 +209,17 @@ bool cpp_write_blocks(torch::Tensor buffer,
       }
     }
     tmp_paths[i] = dest_files[i] + ".tmp";
+#ifdef O_DIRECT
+    if (g_use_o_direct) {
+      fds[i] = open(tmp_paths[i].c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT, 0644);
+      if (fds[i] < 0 && errno == EINVAL)
+        fds[i] = open(tmp_paths[i].c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    } else {
+      fds[i] = open(tmp_paths[i].c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    }
+#else
     fds[i] = open(tmp_paths[i].c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+#endif
     if (fds[i] < 0) {
       std::cerr << "[ERROR] Failed to open tmp file: " << tmp_paths[i]
                 << " - " << std::strerror(errno) << "\n";
@@ -273,4 +305,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("get_io_thread_count",
         &get_io_thread_count,
         "Get the current number of threads in the I/O thread pool");
+
+  m.def("set_o_direct",
+        &set_o_direct,
+        "Enable or disable O_DIRECT for all I/O operations",
+        py::arg("enabled"));
+
+  m.def("get_o_direct",
+        &get_o_direct,
+        "Get whether O_DIRECT is currently enabled");
 }

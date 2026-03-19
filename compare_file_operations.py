@@ -4,14 +4,14 @@ import statistics
 import random
 import argparse
 
-from utils.config import STORAGE_PATH, CLUSTER
+from utils.config import STORAGE_PATH, CLUSTER, set_o_direct
 from utils.file_utils import generate_dest_file_names, clean_files, write_blocks
 from utils.benchmark_core import (
     create_benchmark_config, load_or_create_results, setup_executor, allocate_buffers,
     shutdown_executor, save_results, print_benchmark_summary, run_benchmark_iteration,
     run_concurrent_benchmark_iteration, setup_cleaning_files
 )
-from backends.cpp_backend import CPP_AVAILABLE
+from backends.cpp_backend import CPP_AVAILABLE, set_o_direct_cpp
 from utils.checkpoints_utils import save_incremental_results
 
 async def blocks_benchmark(num_blocks, iterations, buffer_size, implementation, test_name, block_sizes_mb, threads_counts, verify=False):
@@ -431,9 +431,19 @@ if __name__ == "__main__":
         default=False,
         help='Verify file contents after write/read operations (default: False)'
     )
-    
+    parser.add_argument(
+        '--o-direct',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Use O_DIRECT to bypass the OS page cache (default: disabled). Use --o-direct to enable.'
+    )
+
     args = parser.parse_args()
-    
+
+    # Apply O_DIRECT setting globally before any I/O backends are used
+    set_o_direct(args.o_direct)
+    set_o_direct_cpp(args.o_direct)
+
     # Clean up any leftover files from previous runs
     print("="*80)
     print("CLEANING UP STORAGE")
@@ -462,6 +472,7 @@ if __name__ == "__main__":
     print(f"Cluster:         {CLUSTER}")
     print(f"Test_name:       {args.test_name}")
     print(f"Verify:          {args.verify}")
+    print(f"O_DIRECT:        {args.o_direct}")
 
     if args.mode == 'blocks':
         print(f"Num Blocks:      {args.num_blocks}")
