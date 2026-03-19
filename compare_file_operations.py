@@ -432,6 +432,13 @@ if __name__ == "__main__":
         help='Verify file contents after write/read operations (default: False)'
     )
     parser.add_argument(
+        '--threads',
+        type=int,
+        nargs='+',
+        default=None,
+        help='List of thread counts to test. Example: --threads 8 16 32 (default: [1] for nixl, [16 32 64] for others)'
+    )
+    parser.add_argument(
         '--o-direct',
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -458,7 +465,12 @@ if __name__ == "__main__":
     
     # Convert buffer size from GB to bytes
     buffer_size = args.buffer_size * 1024 * 1024 * 1024
-    threads_counts = [16, 32, 64]
+    if args.threads is not None:
+        threads_counts = args.threads
+    elif args.backend == "nixl":
+        threads_counts = [1]  # Non-threaded by default for nixl
+    else:
+        threads_counts = [16, 32, 64]
     
     print("="*80)
     print("I/O BENCHMARK CONFIGURATION")
@@ -468,6 +480,7 @@ if __name__ == "__main__":
     print(f"Buffer Size:     {args.buffer_size} GB")
     print(f"Iterations:      {args.iterations}")
     print(f"Block Sizes:     {args.block_sizes} MB")
+    print(f"Thread Counts:   {threads_counts}")
     print(f"Storage Path:    {STORAGE_PATH}")
     print(f"Cluster:         {CLUSTER}")
     print(f"Test_name:       {args.test_name}")

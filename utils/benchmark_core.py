@@ -9,7 +9,12 @@ import torch
 from backends.cpp_backend import cpp_write_blocks, cpp_read_blocks
 from backends.aiofiles_backend import aiofiles_write_blocks, aiofiles_read_blocks
 from backends.python_self_backend import python_self_write_blocks, python_self_read_blocks
-from backends.nixl_backend import nixl_write_blocks, nixl_read_blocks, nixl_register_buffer, nixl_unregister_buffer, _get_read_agent, _get_write_agent
+from backends.nixl_backend import (
+    nixl_write_blocks, nixl_read_blocks,
+    nixl_register_write_buffer, nixl_unregister_write_buffer,
+    nixl_register_read_buffer, nixl_unregister_read_buffer,
+    set_thread_count_nixl,
+)
 from utils.file_utils import verify_op
 import time
 
@@ -59,6 +64,9 @@ def setup_executor(implementation, num_threads):
     """Setup thread pool executor for the given implementation."""
     if implementation == "cpp":
         set_thread_count_cpp(num_threads)
+        return None
+    elif implementation == "nixl":
+        set_thread_count_nixl(num_threads)
         return None
     else:
         loop = asyncio.get_running_loop()
@@ -134,25 +142,25 @@ async def run_benchmark_iteration(
         await python_self_read_blocks(block_size_cleaning, view_cleaning, indices_cleaning, file_names_cleaning)
 
     elif implementation == "nixl":
-        reg_handler_write = nixl_register_buffer(_get_write_agent(), buffer)
+        write_handles = nixl_register_write_buffer(buffer)
         time_write = nixl_write_blocks(block_size, buffer, blocks_indices_write, file_names)
         verify_op(block_size, blocks_indices_write, view, file_names, "Writing", verify)
-        nixl_unregister_buffer(_get_write_agent(), reg_handler_write)
-        
+        nixl_unregister_write_buffer(write_handles)
+
         # reading 100GB of other blocks to clean the cache
-        reg_handler_cleaning = nixl_register_buffer(_get_read_agent(), buffer_cleaning)
+        cleaning_handles = nixl_register_read_buffer(buffer_cleaning)
         nixl_read_blocks(block_size_cleaning, buffer_cleaning, indices_cleaning, file_names_cleaning)
-        nixl_unregister_buffer(_get_read_agent(), reg_handler_cleaning)
-        
-        reg_handler_read = nixl_register_buffer(_get_read_agent(), buffer)
+        nixl_unregister_read_buffer(cleaning_handles)
+
+        read_handles = nixl_register_read_buffer(buffer)
         time_read = nixl_read_blocks(block_size, buffer, blocks_indices_read, file_names)
-        nixl_unregister_buffer(_get_read_agent(), reg_handler_read)
+        nixl_unregister_read_buffer(read_handles)
         verify_op(block_size, blocks_indices_read, view, file_names, "Reading", verify)
-        
+
         # reading 100GB of other blocks to clean the cache
-        reg_handler_cleaning = nixl_register_buffer(_get_read_agent(), buffer_cleaning)
+        cleaning_handles = nixl_register_read_buffer(buffer_cleaning)
         nixl_read_blocks(block_size_cleaning, buffer_cleaning, indices_cleaning, file_names_cleaning)
-        nixl_unregister_buffer(_get_read_agent(), reg_handler_cleaning)
+        nixl_unregister_read_buffer(cleaning_handles)
 
     else:  # python_self_imp
         time_write = await python_self_write_blocks(block_size, view, blocks_indices_write, file_names)
@@ -181,38 +189,38 @@ async def run_concurrent_benchmark_iteration(
     if implementation == "cpp":
         await cpp_read_blocks(block_size_cleaning, buffer_cleaning, indices_cleaning, file_names_cleaning)
     elif implementation == "nixl":
-        reg_handler_cleaning = nixl_register_buffer(_get_read_agent(), buffer_cleaning)
+        cleaning_handles = nixl_register_read_buffer(buffer_cleaning)
         nixl_read_blocks(block_size_cleaning, buffer_cleaning, indices_cleaning, file_names_cleaning)
-        nixl_unregister_buffer(_get_read_agent(), reg_handler_cleaning)
+        nixl_unregister_read_buffer(cleaning_handles)
     else:
         await python_self_read_blocks(block_size_cleaning, view_cleaning, indices_cleaning, file_names_cleaning)
 
     # Run concurrent read and write operations
     start_time = time.perf_counter()
-    
+
     if implementation == "cpp":
         # Run both operations concurrently
         write_task = cpp_write_blocks(block_size, buffer, blocks_indices_write, file_names_write)
         read_task = cpp_read_blocks(block_size, buffer, blocks_indices_read, file_names_read)
         time_write, time_read = await asyncio.gather(write_task, read_task)
-        
+
     elif implementation == "python_aiofiles":
         write_task = aiofiles_write_blocks(block_size, view, blocks_indices_write, file_names_write)
         read_task = aiofiles_read_blocks(block_size, view, blocks_indices_read, file_names_read)
         time_write, time_read = await asyncio.gather(write_task, read_task)
-        
+
     elif implementation == "nixl":
-        reg_handler_write = nixl_register_buffer(_get_write_agent(), buffer)
-        reg_handler_read = nixl_register_buffer(_get_read_agent(), buffer)
-        
+        write_handles = nixl_register_write_buffer(buffer)
+        read_handles = nixl_register_read_buffer(buffer)
+
         # NIXL operations are synchronous, so we need to wrap them
         loop = asyncio.get_running_loop()
         write_task = loop.run_in_executor(None, nixl_write_blocks, block_size, buffer, blocks_indices_write, file_names_write)
         read_task = loop.run_in_executor(None, nixl_read_blocks, block_size, buffer, blocks_indices_read, file_names_read)
         time_write, time_read = await asyncio.gather(write_task, read_task)
-        
-        nixl_unregister_buffer(_get_write_agent(), reg_handler_write)
-        nixl_unregister_buffer(_get_read_agent(), reg_handler_read)
+
+        nixl_unregister_write_buffer(write_handles)
+        nixl_unregister_read_buffer(read_handles)
         
     else:  # python_self_imp
         write_task = python_self_write_blocks(block_size, view, blocks_indices_write, file_names_write)
@@ -229,12 +237,12 @@ async def run_concurrent_benchmark_iteration(
     if implementation == "cpp":
         await cpp_read_blocks(block_size_cleaning, buffer_cleaning, indices_cleaning, file_names_cleaning)
     elif implementation == "nixl":
-        reg_handler_cleaning = nixl_register_buffer(_get_read_agent(), buffer_cleaning)
+        cleaning_handles = nixl_register_read_buffer(buffer_cleaning)
         nixl_read_blocks(block_size_cleaning, buffer_cleaning, indices_cleaning, file_names_cleaning)
-        nixl_unregister_buffer(_get_read_agent(), reg_handler_cleaning)
+        nixl_unregister_read_buffer(cleaning_handles)
     else:
         await python_self_read_blocks(block_size_cleaning, view_cleaning, indices_cleaning, file_names_cleaning)
-    
+
     return time_write, time_read, total_time
 
 

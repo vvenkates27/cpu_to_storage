@@ -18,6 +18,9 @@ namespace fs = std::filesystem;
 
 #include "simple_thread_pool.hpp"
 
+// Global O_DIRECT flag (can be toggled at runtime)
+static bool g_use_o_direct = true;
+
 // Read block_size bytes from path into buffer_ptr using pread().
 static bool pread_file(const std::string& path, uint8_t* buffer_ptr, size_t block_size) {
 #ifdef O_DIRECT
@@ -59,9 +62,6 @@ static bool pread_file(const std::string& path, uint8_t* buffer_ptr, size_t bloc
   close(fd);
   return true;
 }
-
-// Global O_DIRECT flag (can be toggled at runtime)
-static bool g_use_o_direct = true;
 
 void set_o_direct(bool enabled) {
   g_use_o_direct = enabled;
