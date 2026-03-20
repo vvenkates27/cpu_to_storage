@@ -4,7 +4,8 @@ import statistics
 import random
 import argparse
 
-from utils.config import STORAGE_PATH, CLUSTER, set_o_direct
+from utils.config import STORAGE_PATH, CLUSTER, set_o_direct, set_nixl_use_uring, set_nixl_gds_mt_threads
+from backends.nixl_backend import set_nixl_io_backend
 from utils.file_utils import generate_dest_file_names, clean_files, write_blocks
 from utils.benchmark_core import (
     create_benchmark_config, load_or_create_results, setup_executor, allocate_buffers,
@@ -444,12 +445,38 @@ if __name__ == "__main__":
         default=False,
         help='Use O_DIRECT to bypass the OS page cache (default: disabled). Use --o-direct to enable.'
     )
+    parser.add_argument(
+        '--nixl-backend',
+        type=str,
+        choices=['POSIX', 'GDS_MT'],
+        default='POSIX',
+        help='NIXL I/O backend to use (default: POSIX). Only applies when --backend nixl.'
+    )
+    parser.add_argument(
+        '--nixl-use-uring',
+        action='store_true',
+        default=False,
+        help='Enable io_uring within the POSIX NIXL backend (default: disabled). Only applies when --nixl-backend POSIX.'
+    )
+    parser.add_argument(
+        '--nixl-gds-threads',
+        type=int,
+        default=None,
+        help='Number of internal threads for the GDS_MT backend (default: hardware_concurrency/2). Only applies when --nixl-backend GDS_MT.'
+    )
 
     args = parser.parse_args()
 
     # Apply O_DIRECT setting globally before any I/O backends are used
     set_o_direct(args.o_direct)
     set_o_direct_cpp(args.o_direct)
+
+    # Apply NIXL backend settings (must happen before any agents are created)
+    if args.backend == 'nixl':
+        set_nixl_io_backend(args.nixl_backend)
+        set_nixl_use_uring(args.nixl_use_uring)
+        if args.nixl_backend == 'GDS_MT' and args.nixl_gds_threads is not None:
+            set_nixl_gds_mt_threads(args.nixl_gds_threads)
 
     # Clean up any leftover files from previous runs
     print("="*80)
@@ -486,6 +513,12 @@ if __name__ == "__main__":
     print(f"Test_name:       {args.test_name}")
     print(f"Verify:          {args.verify}")
     print(f"O_DIRECT:        {args.o_direct}")
+    if args.backend == 'nixl':
+        uring_str = " + io_uring" if args.nixl_use_uring and args.nixl_backend == "POSIX" else ""
+        print(f"NIXL Backend:    {args.nixl_backend}{uring_str}")
+        if args.nixl_backend == 'GDS_MT':
+            gds_threads_str = str(args.nixl_gds_threads) if args.nixl_gds_threads is not None else "default (hw_concurrency/2)"
+            print(f"GDS_MT Threads:  {gds_threads_str}")
 
     if args.mode == 'blocks':
         print(f"Num Blocks:      {args.num_blocks}")

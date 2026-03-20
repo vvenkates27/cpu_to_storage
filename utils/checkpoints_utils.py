@@ -67,7 +67,8 @@ def check_config_match(existing_config: dict, new_config: dict) -> bool:
     """
     # Compare key configuration parameters
     key_params = ['buffer_size', 'num_iterations', 'block_sizes_mb', 'thread_counts',
-                  'num_blocks', 'total_data_size_gb', 'implementation', 'o_direct', 'mode']
+                  'num_blocks', 'total_data_size_gb', 'implementation', 'o_direct', 'mode',
+                  'nixl_io_backend', 'nixl_use_uring', 'nixl_gds_mt_threads']
     
     for param in key_params:
         if param in new_config:

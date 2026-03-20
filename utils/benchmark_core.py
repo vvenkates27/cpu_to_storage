@@ -4,7 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from utils.checkpoints_utils import save_incremental_results, load_existing_results, check_config_match, get_completed_tests
 from backends.cpp_backend import set_thread_count_cpp
-from utils.config import PYTHON_BACKENDS, CLUSTER, STORAGE_PATH, get_o_direct
+from utils.config import PYTHON_BACKENDS, CLUSTER, STORAGE_PATH, get_o_direct, get_nixl_io_backend, get_nixl_use_uring, get_nixl_gds_mt_threads
 import torch
 from backends.cpp_backend import cpp_write_blocks, cpp_read_blocks
 from backends.aiofiles_backend import aiofiles_write_blocks, aiofiles_read_blocks
@@ -29,6 +29,9 @@ def create_benchmark_config(buffer_size, iterations, threads_counts, block_sizes
         'file_system': f'{STORAGE_PATH} ({"tmpfs" if STORAGE_PATH == "/dev/shm" else "persistent storage"})',
         'implementation': implementation,
         'o_direct': get_o_direct(),
+        'nixl_io_backend': get_nixl_io_backend() if implementation == 'nixl' else None,
+        'nixl_use_uring': get_nixl_use_uring() if implementation == 'nixl' else None,
+        'nixl_gds_mt_threads': get_nixl_gds_mt_threads() if implementation == 'nixl' else None,
     }
     config.update(kwargs)
     return config

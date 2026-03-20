@@ -24,3 +24,45 @@ def set_o_direct(enabled: bool) -> None:
 
 def get_o_direct() -> bool:
     return USE_O_DIRECT
+
+
+# NIXL I/O backend selection. Valid values: "POSIX", "GDS_MT".
+# Controlled at runtime via set_nixl_io_backend() called from the CLI.
+NIXL_IO_BACKEND: str = "POSIX"
+
+# Enable io_uring within the POSIX backend (passed as backend param use_uring=true).
+# Only applicable when NIXL_IO_BACKEND == "POSIX".
+NIXL_USE_URING: bool = False
+
+
+def set_nixl_io_backend(backend: str) -> None:
+    global NIXL_IO_BACKEND
+    NIXL_IO_BACKEND = backend
+
+
+def get_nixl_io_backend() -> str:
+    return NIXL_IO_BACKEND
+
+
+def set_nixl_use_uring(enabled: bool) -> None:
+    global NIXL_USE_URING
+    NIXL_USE_URING = enabled
+
+
+def get_nixl_use_uring() -> bool:
+    return NIXL_USE_URING
+
+
+# GDS_MT internal thread count. None means use the GDS_MT default
+# (hardware_concurrency / 2). Passed as backend param thread_count=N
+# to a single NIXL agent; no agent splitting is used.
+NIXL_GDS_MT_THREADS: int = None
+
+
+def set_nixl_gds_mt_threads(n: int) -> None:
+    global NIXL_GDS_MT_THREADS
+    NIXL_GDS_MT_THREADS = n
+
+
+def get_nixl_gds_mt_threads() -> int:
+    return NIXL_GDS_MT_THREADS

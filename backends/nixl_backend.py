@@ -31,14 +31,34 @@ _read_agent_pool: list  = []  # list of (agent_name, agent) tuples
 _nixl_num_threads = 1
 
 
+_NIXL_MT_MAX_THREADS = 8
+_nixl_split_warned = False  # Print the experimental warning only once per process
+
+
 def _grow_pool(pool: list, prefix: str, target: int):
     """Append new agents to *pool* until it has at least *target* entries."""
     while len(pool) < target:
         idx = len(pool)
         name = f"{prefix}_{idx}"
-        conf = nixl_agent_config(enable_prog_thread=True, backends=["POSIX"])
+        conf = nixl_agent_config(enable_prog_thread=True, backends=[])
         agent = nixl_agent(agent_name=name, nixl_conf=conf, instantiate_all=False)
+        backend_params = {}
+        if config.NIXL_IO_BACKEND == "POSIX" and config.NIXL_USE_URING:
+            backend_params["use_uring"] = "true"
+        elif config.NIXL_IO_BACKEND == "GDS_MT" and config.NIXL_GDS_MT_THREADS is not None:
+            backend_params["thread_count"] = str(config.NIXL_GDS_MT_THREADS)
+        agent.create_backend(config.NIXL_IO_BACKEND, backend_params)
         pool.append((name, agent))
+
+
+def set_nixl_io_backend(backend: str):
+    """Switch the NIXL I/O backend (POSIX or GDS_MT).
+    Clears the agent pools so new agents are created with the new backend.
+    Must be called before any transfers start."""
+    config.set_nixl_io_backend(backend)
+    global _write_agent_pool, _read_agent_pool
+    _write_agent_pool = []
+    _read_agent_pool = []
 
 
 def set_thread_count_nixl(n: int):
@@ -47,6 +67,20 @@ def set_thread_count_nixl(n: int):
     # Pre-create agents so threads are ready before the first transfer
     _grow_pool(_write_agent_pool, "NIXL_Writer", n)
     _grow_pool(_read_agent_pool,  "NIXL_Reader", n)
+
+
+def _resolve_split_threads(n: int) -> int:
+    """Enforce the experimental cap when NIXL agents are split across threads.
+    Only called from the agent-split path (n > 1)."""
+    global _nixl_split_warned
+    if n > _NIXL_MT_MAX_THREADS:
+        print(f"[WARNING] NIXL agent splitting is experimental: "
+              f"capping thread count from {n} to {_NIXL_MT_MAX_THREADS}.")
+        n = _NIXL_MT_MAX_THREADS
+    elif not _nixl_split_warned:
+        print(f"[WARNING] NIXL agent splitting is experimental (threads={n}).")
+        _nixl_split_warned = True
+    return n
 
 
 def _register_buffer(agent: nixl_agent, buffer: torch.Tensor):
@@ -97,7 +131,7 @@ def _write_chunk(agent, agent_name, block_size, buffer_addr, chunk_indices, chun
             remote_descs_data.append((0, block_size, fd, ""))
 
         local_xfer_dl = agent.get_xfer_descs(local_descs_data, mem_type="DRAM")
-        file_handle = agent.register_memory(remote_descs_data, mem_type="FILE", backends=["POSIX"])
+        file_handle = agent.register_memory(remote_descs_data, mem_type="FILE", backends=[config.NIXL_IO_BACKEND])
         file_desc = file_handle.trim()
 
         xfer_handle = agent.initialize_xfer(
@@ -105,7 +139,7 @@ def _write_chunk(agent, agent_name, block_size, buffer_addr, chunk_indices, chun
             local_descs=local_xfer_dl,
             remote_descs=file_desc,
             remote_agent=agent_name,
-            backends=["POSIX"]
+            backends=[config.NIXL_IO_BACKEND]
         )
         agent.transfer(xfer_handle)
 
@@ -154,6 +188,7 @@ def nixl_write_blocks(block_size, buffer, blocks_indices, file_names):
         pool_name, pool_agent = _write_agent_pool[0]
         _write_chunk(pool_agent, pool_name, block_size, buffer_addr, chunks[0], fname_chunks[0])
     else:
+        n = _resolve_split_threads(n)
         with ThreadPoolExecutor(max_workers=n) as executor:
             futures = [
                 executor.submit(_write_chunk, _write_agent_pool[i][1], _write_agent_pool[i][0],
@@ -183,7 +218,7 @@ def _read_chunk(agent, agent_name, block_size, buffer_addr, chunk_indices, chunk
             remote_descs_data.append((0, block_size, fd, ""))
 
         local_xfer_dl = agent.get_xfer_descs(local_descs_data, mem_type="DRAM")
-        file_handle = agent.register_memory(remote_descs_data, mem_type="FILE", backends=["POSIX"])
+        file_handle = agent.register_memory(remote_descs_data, mem_type="FILE", backends=[config.NIXL_IO_BACKEND])
         file_desc = file_handle.trim()
 
         xfer_handle = agent.initialize_xfer(
@@ -191,7 +226,7 @@ def _read_chunk(agent, agent_name, block_size, buffer_addr, chunk_indices, chunk
             local_descs=local_xfer_dl,
             remote_descs=file_desc,
             remote_agent=agent_name,
-            backends=["POSIX"]
+            backends=[config.NIXL_IO_BACKEND]
         )
         agent.transfer(xfer_handle)
 
@@ -237,6 +272,7 @@ def nixl_read_blocks(block_size, buffer, block_indices: list, file_names: list):
         pool_name, pool_agent = _read_agent_pool[0]
         _read_chunk(pool_agent, pool_name, block_size, buffer_addr, chunks[0], fname_chunks[0])
     else:
+        n = _resolve_split_threads(n)
         with ThreadPoolExecutor(max_workers=n) as executor:
             futures = [
                 executor.submit(_read_chunk, _read_agent_pool[i][1], _read_agent_pool[i][0],

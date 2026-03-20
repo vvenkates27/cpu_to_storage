@@ -1,0 +1,68 @@
+{
+  "tests": [
+    {
+      "name": "cpp_no_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "cpp", "--no-o-direct", "--threads", "1", "2", "4", "8", "16", "32"]
+    },
+    {
+      "name": "cpp_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "cpp", "--o-direct", "--threads", "1", "2", "4", "8", "16", "32"]
+    },
+    {
+      "name": "python_no_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "python_self_imp", "--no-o-direct", "--threads", "1", "2", "4", "8", "16", "32"]
+    },
+    {
+      "name": "python_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "python_self_imp", "--o-direct", "--threads", "1", "2", "4", "8", "16", "32"]
+    },
+    {
+      "name": "nixl_posix_no_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "nixl", "--nixl-backend", "POSIX", "--no-o-direct", "--threads", "1", "2", "4", "8"]
+    },
+    {
+      "name": "nixl_posix_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "nixl", "--nixl-backend", "POSIX", "--o-direct", "--threads", "1", "2", "4", "8"]
+    },
+    {
+      "name": "nixl_gds_mt_t8_no_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "nixl", "--nixl-backend", "GDS_MT", "--nixl-gds-threads", "8", "--no-o-direct", "--threads", "1"]
+    },
+    {
+      "name": "nixl_gds_mt_t8_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "nixl", "--nixl-backend", "GDS_MT", "--nixl-gds-threads", "8", "--o-direct", "--threads", "1"]
+    },
+    {
+      "name": "nixl_gds_mt_t16_no_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "nixl", "--nixl-backend", "GDS_MT", "--nixl-gds-threads", "16", "--no-o-direct", "--threads", "1"]
+    },
+    {
+      "name": "nixl_gds_mt_t16_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "nixl", "--nixl-backend", "GDS_MT", "--nixl-gds-threads", "16", "--o-direct", "--threads", "1"]
+    },
+    {
+      "name": "nixl_gds_mt_t32_no_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "nixl", "--nixl-backend", "GDS_MT", "--nixl-gds-threads", "32", "--no-o-direct", "--threads", "1"]
+    },
+    {
+      "name": "nixl_gds_mt_t32_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "nixl", "--nixl-backend", "GDS_MT", "--nixl-gds-threads", "32", "--o-direct", "--threads", "1"]
+    },
+    {
+      "name": "nixl_gds_mt_t64_no_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "nixl", "--nixl-backend", "GDS_MT", "--nixl-gds-threads", "64", "--no-o-direct", "--threads", "1"]
+    },
+    {
+      "name": "nixl_gds_mt_t64_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "nixl", "--nixl-backend", "GDS_MT", "--nixl-gds-threads", "64", "--o-direct", "--threads", "1"]
+    },
+    {
+      "name": "nixl_gds_mt_t128_no_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "nixl", "--nixl-backend", "GDS_MT", "--nixl-gds-threads", "128", "--no-o-direct", "--threads", "1"]
+    },
+    {
+      "name": "nixl_gds_mt_t128_odirect",
+      "args": ["--mode", "data", "--total-gb", "100", "--block-sizes", "2", "4", "8", "16", "32", "64", "--iterations", "5", "--buffer-size", "100", "--backend", "nixl", "--nixl-backend", "GDS_MT", "--nixl-gds-threads", "128", "--o-direct", "--threads", "1"]
+    }
+  ]
+}
