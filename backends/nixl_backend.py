@@ -23,7 +23,7 @@ STORAGE_PATH = os.environ.get('STORAGE_PATH', '/dev/shm')
 # Per-thread agent pools: one agent per thread slot so threads never share an agent.
 # NIXL agents are NOT thread-safe; sharing one across threads causes heap corruption.
 # Pools grow (never shrink) as set_thread_count_nixl is called with increasing values,
-# so calling with [1, 4, 8] will ultimately create 8 write + 8 read agents.
+# so calling with [1, 4, 16] will ultimately create 16 write + 16 read agents.
 _write_agent_pool: list = []  # list of (agent_name, agent) tuples
 _read_agent_pool: list  = []  # list of (agent_name, agent) tuples
 
@@ -31,8 +31,24 @@ _read_agent_pool: list  = []  # list of (agent_name, agent) tuples
 _nixl_num_threads = 1
 
 
-_NIXL_MT_MAX_THREADS = 8
 _nixl_split_warned = False  # Print the experimental warning only once per process
+_NIXL_IOS_PER_CHUNK = 16    # Contiguous IOs per chunk before round-robining across threads
+
+
+def _distribute_blocks(blocks_indices, file_names, n):
+    """Split blocks into contiguous chunks of _NIXL_IOS_PER_CHUNK, then
+    assign chunks round-robin across n threads. Each thread receives a list
+    of contiguous runs rather than individually scattered blocks."""
+    thread_indices = [[] for _ in range(n)]
+    thread_fnames  = [[] for _ in range(n)]
+    chunk_id = 0
+    for start in range(0, len(blocks_indices), _NIXL_IOS_PER_CHUNK):
+        end = start + _NIXL_IOS_PER_CHUNK
+        t = chunk_id % n
+        thread_indices[t].extend(blocks_indices[start:end])
+        thread_fnames[t].extend(file_names[start:end])
+        chunk_id += 1
+    return thread_indices, thread_fnames
 
 
 def _grow_pool(pool: list, prefix: str, target: int):
@@ -70,14 +86,9 @@ def set_thread_count_nixl(n: int):
 
 
 def _resolve_split_threads(n: int) -> int:
-    """Enforce the experimental cap when NIXL agents are split across threads.
-    Only called from the agent-split path (n > 1)."""
+    """Warn once when NIXL agents are split across threads (experimental path)."""
     global _nixl_split_warned
-    if n > _NIXL_MT_MAX_THREADS:
-        print(f"[WARNING] NIXL agent splitting is experimental: "
-              f"capping thread count from {n} to {_NIXL_MT_MAX_THREADS}.")
-        n = _NIXL_MT_MAX_THREADS
-    elif not _nixl_split_warned:
+    if not _nixl_split_warned:
         print(f"[WARNING] NIXL agent splitting is experimental (threads={n}).")
         _nixl_split_warned = True
     return n
@@ -177,12 +188,8 @@ def nixl_write_blocks(block_size, buffer, blocks_indices, file_names):
     n = _nixl_num_threads
     _grow_pool(_write_agent_pool, "NIXL_Writer", n)
 
-    # Split blocks evenly across threads
-    chunks = [[] for _ in range(n)]
-    fname_chunks = [[] for _ in range(n)]
-    for i, (idx, fname) in enumerate(zip(blocks_indices, file_names)):
-        chunks[i % n].append(idx)
-        fname_chunks[i % n].append(fname)
+    # Split into contiguous chunks of _NIXL_IOS_PER_CHUNK, round-robin across threads
+    chunks, fname_chunks = _distribute_blocks(blocks_indices, file_names, n)
 
     if n == 1:
         pool_name, pool_agent = _write_agent_pool[0]
@@ -261,12 +268,8 @@ def nixl_read_blocks(block_size, buffer, block_indices: list, file_names: list):
     n = _nixl_num_threads
     _grow_pool(_read_agent_pool, "NIXL_Reader", n)
 
-    # Split blocks evenly across threads
-    chunks = [[] for _ in range(n)]
-    fname_chunks = [[] for _ in range(n)]
-    for i, (idx, fname) in enumerate(zip(block_indices, file_names)):
-        chunks[i % n].append(idx)
-        fname_chunks[i % n].append(fname)
+    # Split into contiguous chunks of _NIXL_IOS_PER_CHUNK, round-robin across threads
+    chunks, fname_chunks = _distribute_blocks(block_indices, file_names, n)
 
     if n == 1:
         pool_name, pool_agent = _read_agent_pool[0]

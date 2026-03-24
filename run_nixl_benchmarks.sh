@@ -2,24 +2,36 @@
 # run_nixl_benchmarks.sh — comprehensive I/O benchmark across cpp, python_self_imp, and NIXL backends
 #
 # Test inventory (18 runs):
-#   1.  cpp                 no O_DIRECT   threads 1 2 4 8 16 32
-#   2.  cpp                 O_DIRECT      threads 1 2 4 8 16 32
-#   3.  python_self_imp     no O_DIRECT   threads 1 2 4 8 16 32
-#   4.  python_self_imp     O_DIRECT      threads 1 2 4 8 16 32
-#   5.  nixl POSIX          no O_DIRECT   agent-split threads 1 2 4 8
-#   6.  nixl POSIX          O_DIRECT      agent-split threads 1 2 4 8
-#   7.  nixl POSIX+uring    no O_DIRECT   agent-split threads 1 2 4 8
-#   8.  nixl POSIX+uring    O_DIRECT      agent-split threads 1 2 4 8
-#   9.  nixl GDS_MT         no O_DIRECT   1 agent, gds_threads 8 16 32 64 128
-#  10.  nixl GDS_MT         O_DIRECT      1 agent, gds_threads 8 16 32 64 128
+#   1.  nixl POSIX          no O_DIRECT   agent-split threads 1 2 4 8
+#   2.  nixl POSIX          O_DIRECT      agent-split threads 1 2 4 8
+#   3.  nixl POSIX+uring    no O_DIRECT   agent-split threads 1 2 4 8
+#   4.  nixl POSIX+uring    O_DIRECT      agent-split threads 1 2 4 8
+#   5.  nixl GDS_MT         no O_DIRECT   1 agent, gds_threads 8 16 32 64 128
+#   6.  nixl GDS_MT         O_DIRECT      1 agent, gds_threads 8 16 32 64 128
+#   7.  cpp                 no O_DIRECT   threads 1 2 4 8 16 32
+#   8.  cpp                 O_DIRECT      threads 1 2 4 8 16 32
+#   9.  python_self_imp     no O_DIRECT   threads 1 2 4 8 16 32
+#  10.  python_self_imp     O_DIRECT      threads 1 2 4 8 16 32
 #
 # Usage:
 #   bash run_nixl_benchmarks.sh
 #
-# Recommended (survives logout):
-#   screen -S bench
-#   bash run_nixl_benchmarks.sh 2>&1 | tee bench_full.log
-#   Ctrl-A D  (detach)  /  screen -r bench  (reattach)
+# Background (survives logout) — pick one:
+#
+#   nohup (simplest, no reattach):
+#     nohup bash run_nixl_benchmarks.sh > bench_full.log 2>&1 &
+#     echo $!                            # save the PID
+#     tail -f bench_full.log             # watch live output
+#
+#   screen (reattachable):
+#     screen -S bench
+#     bash run_nixl_benchmarks.sh 2>&1 | tee bench_full.log
+#     Ctrl-A D  (detach)  /  screen -r bench  (reattach)
+#
+#   tmux (reattachable):
+#     tmux new -s bench
+#     bash run_nixl_benchmarks.sh 2>&1 | tee bench_full.log
+#     Ctrl-B D  (detach)  /  tmux attach -t bench  (reattach)
 
 set -euo pipefail
 
@@ -34,7 +46,7 @@ ITERATIONS=5
 BUFFER_SIZE=100
 
 THREADS_STANDARD="1 2 4 8 16 32"   # cpp / python_self_imp
-THREADS_NIXL_SPLIT="1 2 4 8"       # NIXL agent-split (experimental, max 8)
+THREADS_NIXL_SPLIT="1 2 4 8"       # NIXL agent-split (experimental)
 GDS_MT_THREADS="8 16 32 64 128"    # GDS_MT internal thread counts (1 NIXL agent each)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -73,8 +85,9 @@ run_benchmark() {
     log "  command   : python3 compare_file_operations.py $*"
     log ""
 
+    # -u = unbuffered: streams output line-by-line instead of batching at the end
     # shellcheck disable=SC2068
-    if python3 compare_file_operations.py $@ 2>&1 | tee "$log_file"; then
+    if python3 -u compare_file_operations.py $@ 2>&1 | tee "$log_file"; then
         log "✓ PASSED  $test_name"
     else
         log "✗ FAILED  $test_name  (exit ${PIPESTATUS[0]}) — continuing..."
@@ -97,69 +110,45 @@ log "======================================================================"
 
 COMMON="--mode $MODE --total-gb $TOTAL_GB --block-sizes $BLOCK_SIZES --iterations $ITERATIONS --buffer-size $BUFFER_SIZE"
 
-# ── 1. cpp  —  no O_DIRECT ────────────────────────────────────────────────────
-run_benchmark "cpp_no_odirect" \
-    "cpp | no O_DIRECT | threads: $THREADS_STANDARD" \
-    $COMMON --backend cpp --no-o-direct --threads $THREADS_STANDARD \
-    --test-name cpp_no_odirect
-
-# ── 2. cpp  —  O_DIRECT ───────────────────────────────────────────────────────
-run_benchmark "cpp_odirect" \
-    "cpp | O_DIRECT | threads: $THREADS_STANDARD" \
-    $COMMON --backend cpp --o-direct --threads $THREADS_STANDARD \
-    --test-name cpp_odirect
-
-# ── 3. python_self_imp  —  no O_DIRECT ───────────────────────────────────────
-run_benchmark "python_no_odirect" \
-    "python_self_imp | no O_DIRECT | threads: $THREADS_STANDARD" \
-    $COMMON --backend python_self_imp --no-o-direct --threads $THREADS_STANDARD \
-    --test-name python_no_odirect
-
-# ── 4. python_self_imp  —  O_DIRECT ──────────────────────────────────────────
-run_benchmark "python_odirect" \
-    "python_self_imp | O_DIRECT | threads: $THREADS_STANDARD" \
-    $COMMON --backend python_self_imp --o-direct --threads $THREADS_STANDARD \
-    --test-name python_odirect
-
-# ── 5. NIXL POSIX  —  no O_DIRECT  —  agent split ────────────────────────────
+# ── 1. NIXL POSIX  —  no O_DIRECT  —  agent split ────────────────────────────
 run_benchmark "nixl_posix_no_odirect" \
     "nixl POSIX | no O_DIRECT | agent-split threads: $THREADS_NIXL_SPLIT" \
     $COMMON --backend nixl --nixl-backend POSIX --no-o-direct \
     --threads $THREADS_NIXL_SPLIT \
     --test-name nixl_posix_no_odirect
 
-# ── 6. NIXL POSIX  —  O_DIRECT  —  agent split ───────────────────────────────
+# ── 2. NIXL POSIX  —  O_DIRECT  —  agent split ───────────────────────────────
 run_benchmark "nixl_posix_odirect" \
     "nixl POSIX | O_DIRECT | agent-split threads: $THREADS_NIXL_SPLIT" \
     $COMMON --backend nixl --nixl-backend POSIX --o-direct \
     --threads $THREADS_NIXL_SPLIT \
     --test-name nixl_posix_odirect
 
-# ── 7. NIXL POSIX + io_uring  —  no O_DIRECT  —  agent split ─────────────────
+# ── 3. NIXL POSIX + io_uring  —  no O_DIRECT  —  agent split ─────────────────
 run_benchmark "nixl_posix_uring_no_odirect" \
     "nixl POSIX+io_uring | no O_DIRECT | agent-split threads: $THREADS_NIXL_SPLIT" \
     $COMMON --backend nixl --nixl-backend POSIX --nixl-use-uring --no-o-direct \
     --threads $THREADS_NIXL_SPLIT \
     --test-name nixl_posix_uring_no_odirect
 
-# ── 8. NIXL POSIX + io_uring  —  O_DIRECT  —  agent split ───────────────────
+# ── 4. NIXL POSIX + io_uring  —  O_DIRECT  —  agent split ───────────────────
 run_benchmark "nixl_posix_uring_odirect" \
     "nixl POSIX+io_uring | O_DIRECT | agent-split threads: $THREADS_NIXL_SPLIT" \
     $COMMON --backend nixl --nixl-backend POSIX --nixl-use-uring --o-direct \
     --threads $THREADS_NIXL_SPLIT \
     --test-name nixl_posix_uring_odirect
 
-# ── 9 & 10. NIXL GDS_MT  —  1 NIXL agent  —  varying internal thread counts ──
+# ── 5 & 6. NIXL GDS_MT  —  1 NIXL agent  —  varying internal thread counts ───
 for GDS_T in $GDS_MT_THREADS; do
 
-    # 9. no O_DIRECT
+    # 5. no O_DIRECT
     run_benchmark "nixl_gds_mt_t${GDS_T}_no_odirect" \
         "nixl GDS_MT | no O_DIRECT | 1 agent | gds_threads=${GDS_T}" \
         $COMMON --backend nixl --nixl-backend GDS_MT --nixl-gds-threads "$GDS_T" \
         --no-o-direct --threads 1 \
         --test-name "nixl_gds_mt_t${GDS_T}_no_odirect"
 
-    # 10. O_DIRECT
+    # 6. O_DIRECT
     run_benchmark "nixl_gds_mt_t${GDS_T}_odirect" \
         "nixl GDS_MT | O_DIRECT | 1 agent | gds_threads=${GDS_T}" \
         $COMMON --backend nixl --nixl-backend GDS_MT --nixl-gds-threads "$GDS_T" \
@@ -167,6 +156,30 @@ for GDS_T in $GDS_MT_THREADS; do
         --test-name "nixl_gds_mt_t${GDS_T}_odirect"
 
 done
+
+# ── 7. cpp  —  no O_DIRECT ────────────────────────────────────────────────────
+run_benchmark "cpp_no_odirect" \
+    "cpp | no O_DIRECT | threads: $THREADS_STANDARD" \
+    $COMMON --backend cpp --no-o-direct --threads $THREADS_STANDARD \
+    --test-name cpp_no_odirect
+
+# ── 8. cpp  —  O_DIRECT ───────────────────────────────────────────────────────
+run_benchmark "cpp_odirect" \
+    "cpp | O_DIRECT | threads: $THREADS_STANDARD" \
+    $COMMON --backend cpp --o-direct --threads $THREADS_STANDARD \
+    --test-name cpp_odirect
+
+# ── 9. python_self_imp  —  no O_DIRECT ───────────────────────────────────────
+run_benchmark "python_no_odirect" \
+    "python_self_imp | no O_DIRECT | threads: $THREADS_STANDARD" \
+    $COMMON --backend python_self_imp --no-o-direct --threads $THREADS_STANDARD \
+    --test-name python_no_odirect
+
+# ── 10. python_self_imp  —  O_DIRECT ──────────────────────────────────────────
+run_benchmark "python_odirect" \
+    "python_self_imp | O_DIRECT | threads: $THREADS_STANDARD" \
+    $COMMON --backend python_self_imp --o-direct --threads $THREADS_STANDARD \
+    --test-name python_odirect
 
 # ── Final summary ─────────────────────────────────────────────────────────────
 log ""
