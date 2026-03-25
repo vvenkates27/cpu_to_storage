@@ -30,6 +30,22 @@ _read_agent_pool: list  = []  # list of (agent_name, agent) tuples
 # Number of threads to use for parallel block transfers
 _nixl_num_threads = 1
 
+# Persistent thread pool — created once, reused across all transfers.
+# Avoids per-call thread creation/destruction overhead (16 threads × ~1ms each).
+_executor: ThreadPoolExecutor | None = None
+_executor_thread_count: int = 0
+
+
+def _get_executor(n: int) -> ThreadPoolExecutor:
+    """Return the shared executor, recreating it only when thread count changes."""
+    global _executor, _executor_thread_count
+    if _executor is None or _executor_thread_count != n:
+        if _executor is not None:
+            _executor.shutdown(wait=False)
+        _executor = ThreadPoolExecutor(max_workers=n)
+        _executor_thread_count = n
+    return _executor
+
 
 _nixl_split_warned = False  # Print the experimental warning only once per process
 _NIXL_IOS_PER_CHUNK = 16    # Contiguous IOs per chunk before round-robining across threads
@@ -78,8 +94,13 @@ def set_nixl_io_backend(backend: str):
 
 
 def set_thread_count_nixl(n: int):
-    global _nixl_num_threads
+    global _nixl_num_threads, _executor, _executor_thread_count
     _nixl_num_threads = n
+    # Reset executor so _get_executor() recreates it with the new count
+    if _executor is not None and _executor_thread_count != n:
+        _executor.shutdown(wait=False)
+        _executor = None
+        _executor_thread_count = 0
     # Pre-create agents so threads are ready before the first transfer
     _grow_pool(_write_agent_pool, "NIXL_Writer", n)
     _grow_pool(_read_agent_pool,  "NIXL_Reader", n)
@@ -160,6 +181,7 @@ def _write_chunk(agent, agent_name, block_size, buffer_addr, chunk_indices, chun
                 break
             elif state == "ERR":
                 raise RuntimeError("NIXL Transfer Failed")
+            time.sleep(0)  # Yield GIL so other threads can poll their own transfers
 
         for fd in open_fds:
             os.close(fd)
@@ -196,14 +218,14 @@ def nixl_write_blocks(block_size, buffer, blocks_indices, file_names):
         _write_chunk(pool_agent, pool_name, block_size, buffer_addr, chunks[0], fname_chunks[0])
     else:
         n = _resolve_split_threads(n)
-        with ThreadPoolExecutor(max_workers=n) as executor:
-            futures = [
-                executor.submit(_write_chunk, _write_agent_pool[i][1], _write_agent_pool[i][0],
-                                block_size, buffer_addr, chunks[i], fname_chunks[i])
-                for i in range(n) if chunks[i]
-            ]
-            for f in futures:
-                f.result()
+        executor = _get_executor(n)
+        futures = [
+            executor.submit(_write_chunk, _write_agent_pool[i][1], _write_agent_pool[i][0],
+                            block_size, buffer_addr, chunks[i], fname_chunks[i])
+            for i in range(n) if chunks[i]
+        ]
+        for f in futures:
+            f.result()
 
     end = time.perf_counter()
     return (end - start)
@@ -243,6 +265,7 @@ def _read_chunk(agent, agent_name, block_size, buffer_addr, chunk_indices, chunk
                 break
             elif state == "ERR":
                 raise RuntimeError("NIXL Transfer Failed")
+            time.sleep(0)  # Yield GIL so other threads can poll their own transfers
 
         for fd in open_fds:
             os.close(fd)
@@ -276,14 +299,14 @@ def nixl_read_blocks(block_size, buffer, block_indices: list, file_names: list):
         _read_chunk(pool_agent, pool_name, block_size, buffer_addr, chunks[0], fname_chunks[0])
     else:
         n = _resolve_split_threads(n)
-        with ThreadPoolExecutor(max_workers=n) as executor:
-            futures = [
-                executor.submit(_read_chunk, _read_agent_pool[i][1], _read_agent_pool[i][0],
-                                block_size, buffer_addr, chunks[i], fname_chunks[i])
-                for i in range(n) if chunks[i]
-            ]
-            for f in futures:
-                f.result()
+        executor = _get_executor(n)
+        futures = [
+            executor.submit(_read_chunk, _read_agent_pool[i][1], _read_agent_pool[i][0],
+                            block_size, buffer_addr, chunks[i], fname_chunks[i])
+            for i in range(n) if chunks[i]
+        ]
+        for f in futures:
+            f.result()
 
     end = time.perf_counter()
     return (end - start)
