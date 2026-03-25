@@ -295,6 +295,212 @@ bool cpp_write_blocks(torch::Tensor buffer,
   return all_success;
 }
 
+// ─── NIXL file-management helpers ──────────────────────────────────────────
+
+// Probe whether O_TMPFILE is usable on dir_path.
+static bool probe_tmpfile(const std::string& dir_path) {
+#ifdef O_TMPFILE
+  int fd = open(dir_path.c_str(), O_TMPFILE | O_WRONLY);
+  if (fd >= 0) { close(fd); return true; }
+#endif
+  (void)dir_path;
+  return false;
+}
+
+// open_files_write: open N files for writing.
+// Returns (fds, open_paths, is_tmpfile).
+//   no_rename       → direct write; open_paths[i] == final_paths[i]
+//   !no_rename + O_TMPFILE → unnamed inode; open_paths[i] == ""
+//   !no_rename + no O_TMPFILE → named temp; open_paths[i] == temp path
+// Sequential opens to avoid O_CREAT directory-inode contention on network FS.
+std::tuple<std::vector<int>, std::vector<std::string>, bool>
+open_files_write(std::vector<std::string> final_paths,
+                 bool no_rename, bool use_o_direct,
+                 std::string storage_path) {
+  py::gil_scoped_release release;
+  size_t n = final_paths.size();
+  std::vector<int> fds(n, -1);
+  std::vector<std::string> open_paths(n);
+
+  bool is_tmpfile = !no_rename && probe_tmpfile(storage_path);
+  SimpleThreadPool& pool = get_thread_pool();
+
+  if (is_tmpfile) {
+    // O_TMPFILE: all threads open the same directory — no O_CREAT inode contention.
+    // Safe to parallelize.
+#ifdef O_TMPFILE
+    std::vector<std::future<int>> futures;
+    futures.reserve(n);
+    for (size_t i = 0; i < n; i++) {
+      futures.push_back(pool.enqueue([&storage_path, use_o_direct]() -> int {
+        int flags = O_TMPFILE | O_WRONLY;
+        if (use_o_direct) {
+          int fd = open(storage_path.c_str(), flags | O_DIRECT);
+          if (fd >= 0 || errno != EINVAL) return fd;
+        }
+        return open(storage_path.c_str(), flags);
+      }));
+    }
+    for (size_t i = 0; i < n; i++) {
+      fds[i] = futures[i].get();
+      open_paths[i] = "";  // unnamed inode — published via /proc/self/fd/
+      if (fds[i] < 0) {
+        for (size_t j = 0; j < i; j++) if (fds[j] >= 0) close(fds[j]);
+        throw std::runtime_error(std::string("open_files_write (O_TMPFILE): ") + std::strerror(errno));
+      }
+    }
+#endif
+  } else {
+    // no_rename or named temp: O_CREAT contends on the directory inode — sequential.
+    for (size_t i = 0; i < n; i++) {
+      int fd = -1;
+      if (no_rename) {
+        int flags = O_WRONLY | O_CREAT | O_TRUNC;
+#ifdef O_DIRECT
+        if (use_o_direct) {
+          fd = open(final_paths[i].c_str(), flags | O_DIRECT, 0644);
+          if (fd < 0 && errno == EINVAL)
+            fd = open(final_paths[i].c_str(), flags, 0644);
+        } else {
+          fd = open(final_paths[i].c_str(), flags, 0644);
+        }
+#else
+        fd = open(final_paths[i].c_str(), flags, 0644);
+#endif
+        open_paths[i] = final_paths[i];
+      } else {
+        std::string sep = (!storage_path.empty() && storage_path.back() == '/') ? "" : "/";
+        std::string temp_path = storage_path + sep + "tmp_nixl_" + std::to_string(i) + ".bin";
+        int flags = O_WRONLY | O_CREAT | O_TRUNC;
+#ifdef O_DIRECT
+        if (use_o_direct) {
+          fd = open(temp_path.c_str(), flags | O_DIRECT, 0644);
+          if (fd < 0 && errno == EINVAL)
+            fd = open(temp_path.c_str(), flags, 0644);
+        } else {
+          fd = open(temp_path.c_str(), flags, 0644);
+        }
+#else
+        fd = open(temp_path.c_str(), flags, 0644);
+#endif
+        open_paths[i] = temp_path;
+      }
+      if (fd < 0) {
+        for (size_t j = 0; j < i; j++) if (fds[j] >= 0) close(fds[j]);
+        throw std::runtime_error(std::string("open_files_write: ") + std::strerror(errno));
+      }
+      fds[i] = fd;
+    }
+  }
+
+  return {fds, open_paths, is_tmpfile};
+}
+
+// publish_and_close: atomically publish written files and close FDs.
+// Uses the shared thread pool for parallel link/rename operations.
+void publish_and_close(std::vector<int> fds,
+                       std::vector<std::string> open_paths,
+                       std::vector<std::string> final_paths,
+                       bool is_tmpfile, bool no_rename) {
+  py::gil_scoped_release release;
+  size_t n = fds.size();
+  SimpleThreadPool& pool = get_thread_pool();
+  std::vector<std::future<bool>> futures;
+  futures.reserve(n);
+
+  for (size_t i = 0; i < n; i++) {
+    int fd = fds[i];
+    if (no_rename) {
+      futures.push_back(pool.enqueue([fd]() -> bool {
+        return close(fd) == 0;
+      }));
+    } else if (is_tmpfile) {
+      std::string final_path = final_paths[i];
+      futures.push_back(pool.enqueue([fd, final_path]() -> bool {
+        char proc_path[64];
+        snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", fd);
+        bool ok = (link(proc_path, final_path.c_str()) == 0);
+        if (!ok)
+          std::cerr << "[ERROR] link " << proc_path << " -> " << final_path
+                    << ": " << std::strerror(errno) << "\n";
+        close(fd);
+        return ok;
+      }));
+    } else {
+      std::string temp_path = open_paths[i];
+      std::string final_path = final_paths[i];
+      futures.push_back(pool.enqueue([fd, temp_path, final_path]() -> bool {
+        bool ok = (std::rename(temp_path.c_str(), final_path.c_str()) == 0);
+        if (!ok)
+          std::cerr << "[ERROR] rename " << temp_path << " -> " << final_path
+                    << ": " << std::strerror(errno) << "\n";
+        close(fd);
+        return ok;
+      }));
+    }
+  }
+
+  bool all_ok = true;
+  for (auto& f : futures)
+    if (!f.get()) all_ok = false;
+  if (!all_ok)
+    std::cerr << "[WARN] publish_and_close: some operations failed\n";
+}
+
+// open_files_read: open existing files for reading in parallel.
+// Safe to parallelize since O_RDONLY has no directory-inode contention.
+std::vector<int> open_files_read(std::vector<std::string> paths, bool use_o_direct) {
+  size_t n = paths.size();
+  std::vector<int> fds(n, -1);
+  std::string failed_path;
+
+  {
+    py::gil_scoped_release release;
+    SimpleThreadPool& pool = get_thread_pool();
+    std::vector<std::future<int>> futures;
+    futures.reserve(n);
+
+    for (size_t i = 0; i < n; i++) {
+      std::string path = paths[i];
+      futures.push_back(pool.enqueue([path, use_o_direct]() -> int {
+#ifdef O_DIRECT
+        if (use_o_direct) {
+          int fd = open(path.c_str(), O_RDONLY | O_DIRECT);
+          if (fd >= 0 || errno != EINVAL) return fd;
+        }
+#endif
+        return open(path.c_str(), O_RDONLY);
+      }));
+    }
+
+    for (size_t i = 0; i < n; i++) {
+      fds[i] = futures[i].get();
+      if (fds[i] < 0 && failed_path.empty())
+        failed_path = paths[i];
+    }
+
+    if (!failed_path.empty())
+      for (int fd : fds) if (fd >= 0) close(fd);
+  }
+
+  if (!failed_path.empty())
+    throw std::runtime_error("open_files_read: open failed for " + failed_path);
+  return fds;
+}
+
+// close_fds: close a list of file descriptors in parallel via thread pool.
+void close_fds(std::vector<int> fds) {
+  py::gil_scoped_release release;
+  SimpleThreadPool& pool = get_thread_pool();
+  std::vector<std::future<void>> futures;
+  futures.reserve(fds.size());
+  for (int fd : fds) {
+    if (fd >= 0)
+      futures.push_back(pool.enqueue([fd]() { close(fd); }));
+  }
+  for (auto& f : futures) f.get();
+}
+
 // PyBind11 bindings
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cpp_read_blocks",
@@ -339,4 +545,32 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("get_no_rename",
         &get_no_rename,
         "Get whether no-rename mode is currently enabled");
+
+  m.def("open_files_write",
+        &open_files_write,
+        "Open N files for writing; returns (fds, open_paths, is_tmpfile)",
+        py::arg("final_paths"),
+        py::arg("no_rename"),
+        py::arg("use_o_direct"),
+        py::arg("storage_path"));
+
+  m.def("publish_and_close",
+        &publish_and_close,
+        "Parallel link/rename + close after NIXL write transfer",
+        py::arg("fds"),
+        py::arg("open_paths"),
+        py::arg("final_paths"),
+        py::arg("is_tmpfile"),
+        py::arg("no_rename"));
+
+  m.def("open_files_read",
+        &open_files_read,
+        "Open N existing files for reading in parallel; returns fds",
+        py::arg("paths"),
+        py::arg("use_o_direct"));
+
+  m.def("close_fds",
+        &close_fds,
+        "Close a list of file descriptors",
+        py::arg("fds"));
 }

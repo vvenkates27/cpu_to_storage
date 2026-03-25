@@ -13,8 +13,12 @@ except ModuleNotFoundError:
     from nixl_cu13._api import nixl_agent, nixl_agent_config
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
 import utils.config as config
+
+try:
+    import cpp_ext
+except ImportError:
+    cpp_ext = None
 
 _O_DIRECT_FLAG = getattr(os, 'O_DIRECT', 0)
 _O_TMPFILE = getattr(os, 'O_TMPFILE', None)
@@ -129,30 +133,23 @@ def nixl_simple_write_blocks(block_size, buffer, blocks_indices, file_names):
     local_descs_data = []
     remote_descs_data = []
     open_fds = []
-    link_pairs = []  # (fd, final_name) — used when O_TMPFILE is available
-    temp_files = []  # (temp_name, final_name) — fallback when O_TMPFILE is absent
+    fds = []
+    open_paths = []
+    is_tmpfile = False
 
     try:
-        # Step 1: open files + build descriptor lists
+        # Step 1: open files via C++ (GIL released, sequential opens for O_CREAT)
         t_open_start = time.perf_counter()
-        for idx, fname in zip(blocks_indices, file_names):
-            if config.NO_RENAME:
-                # Write directly to final filename — no atomic publish step
-                fd = _open_o_direct(fname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-            else:
-                fd = _open_tmpfile(STORAGE_PATH)
-                if fd is not None:
-                    link_pairs.append((fd, fname))
-                else:
-                    temp_fname = f"{STORAGE_PATH}/temp_block_{idx}.bin"
-                    temp_files.append((temp_fname, fname))
-                    fd = _open_o_direct(temp_fname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-            open_fds.append(fd)
+        fds, open_paths, is_tmpfile = cpp_ext.open_files_write(
+            file_names, config.NO_RENAME, config.USE_O_DIRECT, STORAGE_PATH
+        )
+        open_fds = fds
+        t_open = time.perf_counter() - t_open_start
 
+        for idx, fd in zip(blocks_indices, fds):
             block_addr = buffer_addr + (idx * block_size)
             local_descs_data.append((block_addr, block_size, 0))
             remote_descs_data.append((0, block_size, fd, ""))
-        t_open = time.perf_counter() - t_open_start
 
         # Step 2: get local DRAM xfer descriptors
         t_xfer_descs_start = time.perf_counter()
@@ -191,33 +188,16 @@ def nixl_simple_write_blocks(block_size, buffer, blocks_indices, file_names):
                 raise RuntimeError("NIXL Transfer Failed")
         t_xfer = time.perf_counter() - t_xfer_start
 
-        # Step 7: atomically publish files (fds must still be open)
+        # Step 7+8: publish (link/rename) + close FDs via C++ thread pool (GIL released)
         t_link_start = time.perf_counter()
-        if not config.NO_RENAME:
-            n_workers = config.NIXL_GDS_MT_THREADS or len(open_fds)
-            if link_pairs:
-                # O_TMPFILE path: link unnamed inode → final name via /proc/self/fd/
-                with ThreadPoolExecutor(max_workers=n_workers) as link_pool:
-                    list(link_pool.map(
-                        lambda p: os.link(f"/proc/self/fd/{p[0]}", p[1]),
-                        link_pairs,
-                    ))
-            else:
-                # Fallback: atomic rename of named temp files
-                with ThreadPoolExecutor(max_workers=n_workers) as link_pool:
-                    list(link_pool.map(lambda p: os.rename(p[0], p[1]), temp_files))
-        t_link = time.perf_counter() - t_link_start
-
-        # Step 8: close file descriptors
-        t_close_start = time.perf_counter()
-        for fd in open_fds:
-            os.close(fd)
+        cpp_ext.publish_and_close(fds, open_paths, file_names, is_tmpfile, config.NO_RENAME)
         open_fds = []
-        t_close = time.perf_counter() - t_close_start
+        t_link = time.perf_counter() - t_link_start
+        t_close = 0.0
 
     except:
-        for fd in open_fds:
-            os.close(fd)
+        if open_fds:
+            cpp_ext.close_fds(open_fds)
         t_open = t_xfer_descs = t_reg = t_trim = t_init = t_xfer = t_link = t_close = float('nan')
     finally:
         # Step 9: cleanup handles
@@ -237,8 +217,7 @@ def nixl_simple_write_blocks(block_size, buffer, blocks_indices, file_names):
         f"trim={t_trim*1e3:.2f}ms  "
         f"initialize_xfer={t_init*1e3:.2f}ms  "
         f"transfer+poll={t_xfer*1e3:.2f}ms  "
-        f"link={t_link*1e3:.2f}ms  "
-        f"close_fds={t_close*1e3:.2f}ms  "
+        f"publish_close={t_link*1e3:.2f}ms  "
         f"cleanup={t_cleanup*1e3:.2f}ms  "
         f"total={total*1e3:.2f}ms"
     )
@@ -259,17 +238,19 @@ def nixl_simple_read_blocks(block_size, buffer, block_indices, file_names):
     remote_descs_data = []
     open_fds = []
 
-    try:
-        # Step 1: open files + build descriptor lists
-        t_open_start = time.perf_counter()
-        for idx, fname in zip(block_indices, file_names):
-            fd = _open_o_direct(fname, os.O_RDONLY)
-            open_fds.append(fd)
+    fds = []
 
+    try:
+        # Step 1: open files via C++ thread pool (GIL released, parallel O_RDONLY)
+        t_open_start = time.perf_counter()
+        fds = cpp_ext.open_files_read(file_names, config.USE_O_DIRECT)
+        open_fds = fds
+        t_open = time.perf_counter() - t_open_start
+
+        for idx, fd in zip(block_indices, fds):
             block_addr = buffer_addr + (idx * block_size)
             local_descs_data.append((block_addr, block_size, 0))
             remote_descs_data.append((0, block_size, fd, ""))
-        t_open = time.perf_counter() - t_open_start
 
         # Step 2: get local DRAM xfer descriptors
         t_xfer_descs_start = time.perf_counter()
@@ -308,16 +289,15 @@ def nixl_simple_read_blocks(block_size, buffer, block_indices, file_names):
                 raise RuntimeError("NIXL Transfer Failed")
         t_xfer = time.perf_counter() - t_xfer_start
 
-        # Step 7: close file descriptors
+        # Step 7: close file descriptors via C++ (GIL released)
         t_close_start = time.perf_counter()
-        for fd in open_fds:
-            os.close(fd)
+        cpp_ext.close_fds(fds)
         open_fds = []
         t_close = time.perf_counter() - t_close_start
 
     except:
-        for fd in open_fds:
-            os.close(fd)
+        if open_fds:
+            cpp_ext.close_fds(open_fds)
         t_open = t_xfer_descs = t_reg = t_trim = t_init = t_xfer = t_close = float('nan')
     finally:
         # Step 8: cleanup handles
