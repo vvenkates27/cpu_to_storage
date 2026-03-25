@@ -19,6 +19,11 @@ def set_o_direct_cpp(enabled: bool) -> None:
         cpp_ext.set_o_direct(enabled)
 
 
+def set_no_rename_cpp(enabled: bool) -> None:
+    if CPP_AVAILABLE:
+        cpp_ext.set_no_rename(enabled)
+
+
 async def cpp_write_blocks(block_size, buffer, block_indices, dest_files):
     """C++ implementation wrapper for writing blocks.
 

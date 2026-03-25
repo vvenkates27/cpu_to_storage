@@ -21,6 +21,9 @@ namespace fs = std::filesystem;
 // Global O_DIRECT flag (can be toggled at runtime)
 static bool g_use_o_direct = true;
 
+// When true, write directly to the destination file (no .tmp + rename).
+static bool g_no_rename = false;
+
 // Read block_size bytes from path into buffer_ptr using pread().
 static bool pread_file(const std::string& path, uint8_t* buffer_ptr, size_t block_size) {
 #ifdef O_DIRECT
@@ -69,6 +72,14 @@ void set_o_direct(bool enabled) {
 
 bool get_o_direct() {
   return g_use_o_direct;
+}
+
+void set_no_rename(bool enabled) {
+  g_no_rename = enabled;
+}
+
+bool get_no_rename() {
+  return g_no_rename;
 }
 
 // Global thread pool configuration
@@ -193,9 +204,11 @@ bool cpp_write_blocks(torch::Tensor buffer,
   SimpleThreadPool& pool = get_thread_pool();
   size_t n = block_indices.size();
 
-  // Open all temp file FDs sequentially before dispatching any task
+  // Open all file FDs sequentially before dispatching any task.
+  // When g_no_rename is true we open the final destination directly;
+  // otherwise we open a .tmp sidecar and rename after the write completes.
   std::vector<int> fds(n, -1);
-  std::vector<std::string> tmp_paths(n);
+  std::vector<std::string> open_paths(n);  // path actually opened (tmp or dest)
 
   for (size_t i = 0; i < n; i++) {
     fs::path parent_dir = fs::path(dest_files[i]).parent_path();
@@ -208,37 +221,38 @@ bool cpp_write_blocks(torch::Tensor buffer,
         return false;
       }
     }
-    tmp_paths[i] = dest_files[i] + ".tmp";
+    open_paths[i] = g_no_rename ? dest_files[i] : dest_files[i] + ".tmp";
 #ifdef O_DIRECT
     if (g_use_o_direct) {
-      fds[i] = open(tmp_paths[i].c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT, 0644);
+      fds[i] = open(open_paths[i].c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT, 0644);
       if (fds[i] < 0 && errno == EINVAL)
-        fds[i] = open(tmp_paths[i].c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        fds[i] = open(open_paths[i].c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     } else {
-      fds[i] = open(tmp_paths[i].c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      fds[i] = open(open_paths[i].c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     }
 #else
-    fds[i] = open(tmp_paths[i].c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    fds[i] = open(open_paths[i].c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
 #endif
     if (fds[i] < 0) {
-      std::cerr << "[ERROR] Failed to open tmp file: " << tmp_paths[i]
+      std::cerr << "[ERROR] Failed to open file: " << open_paths[i]
                 << " - " << std::strerror(errno) << "\n";
       for (size_t j = 0; j < i; j++) if (fds[j] >= 0) close(fds[j]);
       return false;
     }
   }
 
+  bool no_rename = g_no_rename;  // capture before threads start
   std::vector<std::future<bool>> futures;
   futures.reserve(n);
 
   for (size_t i = 0; i < n; i++) {
     int64_t block_offset = block_indices[i] * block_size;
     int fd = fds[i];
-    std::string tmp_path  = std::move(tmp_paths[i]);
+    std::string open_path = std::move(open_paths[i]);
     std::string dest_file = std::move(dest_files[i]);
 
     futures.push_back(pool.enqueue([buffer_ptr, block_offset, block_size,
-                                    fd, tmp_path, dest_file]() -> bool {
+                                    fd, open_path, dest_file, no_rename]() -> bool {
       size_t total_written = 0;
       while (total_written < static_cast<size_t>(block_size)) {
         ssize_t written = pwrite(fd,
@@ -247,25 +261,27 @@ bool cpp_write_blocks(torch::Tensor buffer,
                                  static_cast<off_t>(total_written));
         if (written < 0) {
           if (errno == EINTR) continue;
-          std::cerr << "[ERROR] pwrite failed: " << tmp_path
+          std::cerr << "[ERROR] pwrite failed: " << open_path
                     << " - " << std::strerror(errno) << "\n";
           close(fd);
-          unlink(tmp_path.c_str());
+          unlink(open_path.c_str());
           return false;
         }
         total_written += written;
       }
       if (close(fd) != 0) {
-        std::cerr << "[ERROR] close failed: " << tmp_path
+        std::cerr << "[ERROR] close failed: " << open_path
                   << " - " << std::strerror(errno) << "\n";
-        unlink(tmp_path.c_str());
+        unlink(open_path.c_str());
         return false;
       }
-      if (std::rename(tmp_path.c_str(), dest_file.c_str()) != 0) {
-        std::cerr << "[ERROR] rename failed: " << tmp_path << " -> "
-                  << dest_file << " - " << std::strerror(errno) << "\n";
-        unlink(tmp_path.c_str());
-        return false;
+      if (!no_rename) {
+        if (std::rename(open_path.c_str(), dest_file.c_str()) != 0) {
+          std::cerr << "[ERROR] rename failed: " << open_path << " -> "
+                    << dest_file << " - " << std::strerror(errno) << "\n";
+          unlink(open_path.c_str());
+          return false;
+        }
       }
       return true;
     }));
@@ -314,4 +330,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("get_o_direct",
         &get_o_direct,
         "Get whether O_DIRECT is currently enabled");
+
+  m.def("set_no_rename",
+        &set_no_rename,
+        "When enabled, write directly to destination (skip .tmp + rename)",
+        py::arg("enabled"));
+
+  m.def("get_no_rename",
+        &get_no_rename,
+        "Get whether no-rename mode is currently enabled");
 }

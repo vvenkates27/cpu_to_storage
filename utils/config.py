@@ -66,3 +66,17 @@ def set_nixl_gds_mt_threads(n: int) -> None:
 
 def get_nixl_gds_mt_threads() -> int:
     return NIXL_GDS_MT_THREADS
+
+
+# Whether to skip atomic publish (temp+rename or O_TMPFILE+linkat) and write
+# directly to the final filename. Useful for measuring rename overhead.
+NO_RENAME: bool = False
+
+
+def set_no_rename(enabled: bool) -> None:
+    global NO_RENAME
+    NO_RENAME = enabled
+
+
+def get_no_rename() -> bool:
+    return NO_RENAME

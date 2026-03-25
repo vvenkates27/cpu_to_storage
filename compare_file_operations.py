@@ -4,7 +4,7 @@ import statistics
 import random
 import argparse
 
-from utils.config import STORAGE_PATH, CLUSTER, set_o_direct, set_nixl_use_uring, set_nixl_gds_mt_threads
+from utils.config import STORAGE_PATH, CLUSTER, set_o_direct, set_nixl_use_uring, set_nixl_gds_mt_threads, set_no_rename
 from backends.nixl_backend import set_nixl_io_backend
 from utils.file_utils import generate_dest_file_names, clean_files, write_blocks
 from utils.benchmark_core import (
@@ -12,7 +12,7 @@ from utils.benchmark_core import (
     shutdown_executor, save_results, print_benchmark_summary, run_benchmark_iteration,
     run_concurrent_benchmark_iteration, setup_cleaning_files
 )
-from backends.cpp_backend import CPP_AVAILABLE, set_o_direct_cpp
+from backends.cpp_backend import CPP_AVAILABLE, set_o_direct_cpp, set_no_rename_cpp
 from utils.checkpoints_utils import save_incremental_results
 
 async def blocks_benchmark(num_blocks, iterations, buffer_size, implementation, test_name, block_sizes_mb, threads_counts, verify=False):
@@ -464,12 +464,22 @@ if __name__ == "__main__":
         default=None,
         help='Number of internal threads for the GDS_MT backend (default: hardware_concurrency/2). Only applies when --nixl-backend GDS_MT.'
     )
+    parser.add_argument(
+        '--no-rename',
+        action='store_true',
+        default=False,
+        help='Skip atomic publish (temp+rename or O_TMPFILE+linkat) and write directly to the destination file. Applies to cpp and nixl backends.'
+    )
 
     args = parser.parse_args()
 
     # Apply O_DIRECT setting globally before any I/O backends are used
     set_o_direct(args.o_direct)
     set_o_direct_cpp(args.o_direct)
+
+    # Apply no-rename setting
+    set_no_rename(args.no_rename)
+    set_no_rename_cpp(args.no_rename)
 
     # Apply NIXL backend settings (must happen before any agents are created)
     if args.backend == 'nixl':
@@ -513,6 +523,7 @@ if __name__ == "__main__":
     print(f"Test_name:       {args.test_name}")
     print(f"Verify:          {args.verify}")
     print(f"O_DIRECT:        {args.o_direct}")
+    print(f"No Rename:       {args.no_rename}")
     if args.backend == 'nixl':
         uring_str = " + io_uring" if args.nixl_use_uring and args.nixl_backend == "POSIX" else ""
         print(f"NIXL Backend:    {args.nixl_backend}{uring_str}")

@@ -136,13 +136,17 @@ def nixl_simple_write_blocks(block_size, buffer, blocks_indices, file_names):
         # Step 1: open files + build descriptor lists
         t_open_start = time.perf_counter()
         for idx, fname in zip(blocks_indices, file_names):
-            fd = _open_tmpfile(STORAGE_PATH)
-            if fd is not None:
-                link_pairs.append((fd, fname))
+            if config.NO_RENAME:
+                # Write directly to final filename — no atomic publish step
+                fd = _open_o_direct(fname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
             else:
-                temp_fname = f"{STORAGE_PATH}/temp_block_{idx}.bin"
-                temp_files.append((temp_fname, fname))
-                fd = _open_o_direct(temp_fname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+                fd = _open_tmpfile(STORAGE_PATH)
+                if fd is not None:
+                    link_pairs.append((fd, fname))
+                else:
+                    temp_fname = f"{STORAGE_PATH}/temp_block_{idx}.bin"
+                    temp_files.append((temp_fname, fname))
+                    fd = _open_o_direct(temp_fname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
             open_fds.append(fd)
 
             block_addr = buffer_addr + (idx * block_size)
@@ -189,18 +193,19 @@ def nixl_simple_write_blocks(block_size, buffer, blocks_indices, file_names):
 
         # Step 7: atomically publish files (fds must still be open)
         t_link_start = time.perf_counter()
-        n_workers = config.NIXL_GDS_MT_THREADS or len(open_fds)
-        if link_pairs:
-            # O_TMPFILE path: link unnamed inode → final name via /proc/self/fd/
-            with ThreadPoolExecutor(max_workers=n_workers) as link_pool:
-                list(link_pool.map(
-                    lambda p: os.link(f"/proc/self/fd/{p[0]}", p[1]),
-                    link_pairs,
-                ))
-        else:
-            # Fallback: atomic rename of named temp files
-            with ThreadPoolExecutor(max_workers=n_workers) as link_pool:
-                list(link_pool.map(lambda p: os.rename(p[0], p[1]), temp_files))
+        if not config.NO_RENAME:
+            n_workers = config.NIXL_GDS_MT_THREADS or len(open_fds)
+            if link_pairs:
+                # O_TMPFILE path: link unnamed inode → final name via /proc/self/fd/
+                with ThreadPoolExecutor(max_workers=n_workers) as link_pool:
+                    list(link_pool.map(
+                        lambda p: os.link(f"/proc/self/fd/{p[0]}", p[1]),
+                        link_pairs,
+                    ))
+            else:
+                # Fallback: atomic rename of named temp files
+                with ThreadPoolExecutor(max_workers=n_workers) as link_pool:
+                    list(link_pool.map(lambda p: os.rename(p[0], p[1]), temp_files))
         t_link = time.perf_counter() - t_link_start
 
         # Step 8: close file descriptors
