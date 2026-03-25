@@ -72,7 +72,7 @@ def _grow_pool(pool: list, prefix: str, target: int):
     while len(pool) < target:
         idx = len(pool)
         name = f"{prefix}_{idx}"
-        conf = nixl_agent_config(enable_prog_thread=True, backends=[])
+        conf = nixl_agent_config(enable_prog_thread=False, backends=[])
         agent = nixl_agent(agent_name=name, nixl_conf=conf, instantiate_all=False)
         backend_params = {}
         if config.NIXL_IO_BACKEND == "POSIX" and config.NIXL_USE_URING:
