@@ -49,6 +49,7 @@ def _get_executor(n: int) -> ThreadPoolExecutor:
 
 _nixl_split_warned = False  # Print the experimental warning only once per process
 _NIXL_IOS_PER_CHUNK = 16    # Contiguous IOs per chunk before round-robining across threads
+_NIXL_QUEUE_DEPTH = 64      # Max IOs submitted per libaio/uring batch; 0 = unlimited (legacy)
 
 
 def _distribute_blocks(blocks_indices, file_names, n):
@@ -144,52 +145,27 @@ def nixl_unregister_read_buffer(handles: list):
     for (_, agent), handle in zip(_read_agent_pool, handles):
         agent.deregister_memory(handle)
 
-def _write_chunk(agent, agent_name, block_size, buffer_addr,
-                 chunk_indices, chunk_fnames,
-                 chunk_fds=None, chunk_temp_names=None):
-    """Write a subset of blocks using the given agent (runs in a single thread).
-
-    When chunk_fds/chunk_temp_names are provided (NIXL_PREOPEN_FDS=True), FDs
-    were opened by the caller before dispatch (python_impl approach).
-    When they are None (NIXL_PREOPEN_FDS=False), each thread opens its own FDs
-    (legacy behavior).
-    """
+def _submit_and_wait(agent, agent_name, block_size, buffer_addr,
+                     batch_indices, batch_fds, batch_temp_names, batch_fnames):
+    """Submit one batch of IOs and wait for completion. Closes FDs and renames on success."""
     local_descs_data = []
     remote_descs_data = []
-    open_fds = []
-    temp_files = []
+    for idx, fd in zip(batch_indices, batch_fds):
+        local_descs_data.append((buffer_addr + idx * block_size, block_size, 0))
+        remote_descs_data.append((0, block_size, fd, ""))
 
-    # Legacy path: open FDs inside the thread
-    if chunk_fds is None:
-        for idx, fname in zip(chunk_indices, chunk_fnames):
-            temp_fname = f"{STORAGE_PATH}/temp_block_{idx}.bin"
-            temp_files.append((temp_fname, fname))
-            fd = _open_o_direct(temp_fname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-            open_fds.append(fd)
-    else:
-        # Pre-open path: use FDs handed off from the main thread
-        open_fds = list(chunk_fds)
-        temp_files = list(zip(chunk_temp_names, chunk_fnames))
-
+    local_xfer_dl = agent.get_xfer_descs(local_descs_data, mem_type="DRAM")
+    file_handle = agent.register_memory(remote_descs_data, mem_type="FILE", backends=[config.NIXL_IO_BACKEND])
+    file_desc = file_handle.trim()
+    xfer_handle = agent.initialize_xfer(
+        operation="WRITE",
+        local_descs=local_xfer_dl,
+        remote_descs=file_desc,
+        remote_agent=agent_name,
+        backends=[config.NIXL_IO_BACKEND]
+    )
     try:
-        for idx, fd in zip(chunk_indices, open_fds):
-            block_addr = buffer_addr + (idx * block_size)
-            local_descs_data.append((block_addr, block_size, 0))
-            remote_descs_data.append((0, block_size, fd, ""))
-
-        local_xfer_dl = agent.get_xfer_descs(local_descs_data, mem_type="DRAM")
-        file_handle = agent.register_memory(remote_descs_data, mem_type="FILE", backends=[config.NIXL_IO_BACKEND])
-        file_desc = file_handle.trim()
-
-        xfer_handle = agent.initialize_xfer(
-            operation="WRITE",
-            local_descs=local_xfer_dl,
-            remote_descs=file_desc,
-            remote_agent=agent_name,
-            backends=[config.NIXL_IO_BACKEND]
-        )
         agent.transfer(xfer_handle)
-
         while True:
             state = agent.check_xfer_state(xfer_handle)
             if state == "DONE":
@@ -197,24 +173,61 @@ def _write_chunk(agent, agent_name, block_size, buffer_addr,
             elif state == "ERR":
                 raise RuntimeError("NIXL Transfer Failed")
             time.sleep(0)  # Yield GIL so other threads can poll their own transfers
-
-        for fd in open_fds:
+        for fd in batch_fds:
             os.close(fd)
-        open_fds = []
-
-        for temp_fname, final_fname in temp_files:
+        for temp_fname, final_fname in zip(batch_temp_names, batch_fnames):
             os.rename(temp_fname, final_fname)
+    finally:
+        agent.release_xfer_handle(xfer_handle)
+        agent.deregister_memory(file_handle)
+
+
+def _write_chunk(agent, agent_name, block_size, buffer_addr,
+                 chunk_indices, chunk_fnames,
+                 chunk_fds=None, chunk_temp_names=None):
+    """Write a subset of blocks using the given agent (runs in a single thread).
+
+    Blocks are processed in batches of _NIXL_QUEUE_DEPTH to bound the number of
+    IOs in flight per thread (prevents flooding Lustre with thousands of concurrent
+    async writes). Set _NIXL_QUEUE_DEPTH=0 to submit all blocks at once (legacy).
+
+    When chunk_fds/chunk_temp_names are provided (NIXL_PREOPEN_FDS=True), FDs
+    were opened by the caller before dispatch (python_impl approach).
+    When they are None (NIXL_PREOPEN_FDS=False), each thread opens its own FDs.
+    """
+    # Build flat lists of (fd, temp_name) for all blocks in this thread's chunk
+    if chunk_fds is None:
+        all_fds = []
+        all_temp_names = []
+        for idx, fname in zip(chunk_indices, chunk_fnames):
+            temp_fname = f"{STORAGE_PATH}/temp_block_{idx}.bin"
+            all_temp_names.append(temp_fname)
+            all_fds.append(_open_o_direct(temp_fname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC))
+    else:
+        all_fds = list(chunk_fds)
+        all_temp_names = list(chunk_temp_names)
+
+    depth = _NIXL_QUEUE_DEPTH if _NIXL_QUEUE_DEPTH > 0 else len(chunk_indices)
+    open_fds = list(all_fds)  # track for cleanup on error
+    try:
+        for start in range(0, len(chunk_indices), depth):
+            end = start + depth
+            _submit_and_wait(
+                agent, agent_name, block_size, buffer_addr,
+                chunk_indices[start:end],
+                all_fds[start:end],
+                all_temp_names[start:end],
+                chunk_fnames[start:end],
+            )
+            # FDs in this batch are already closed by _submit_and_wait
+            open_fds = all_fds[end:]
     except:
         for fd in open_fds:
             try:
                 os.close(fd)
             except OSError:
                 pass
-    finally:
-        if 'xfer_handle' in locals():
-            agent.release_xfer_handle(xfer_handle)
-        if 'file_handle' in locals():
-            agent.deregister_memory(file_handle)
+        raise
 
 
 def nixl_write_blocks(block_size, buffer, blocks_indices, file_names):
