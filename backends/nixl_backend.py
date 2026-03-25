@@ -144,20 +144,35 @@ def nixl_unregister_read_buffer(handles: list):
     for (_, agent), handle in zip(_read_agent_pool, handles):
         agent.deregister_memory(handle)
 
-def _write_chunk(agent, agent_name, block_size, buffer_addr, chunk_indices, chunk_fnames):
-    """Write a subset of blocks using the given agent (runs in a single thread)."""
+def _write_chunk(agent, agent_name, block_size, buffer_addr,
+                 chunk_indices, chunk_fnames,
+                 chunk_fds=None, chunk_temp_names=None):
+    """Write a subset of blocks using the given agent (runs in a single thread).
+
+    When chunk_fds/chunk_temp_names are provided (NIXL_PREOPEN_FDS=True), FDs
+    were opened by the caller before dispatch (python_impl approach).
+    When they are None (NIXL_PREOPEN_FDS=False), each thread opens its own FDs
+    (legacy behavior).
+    """
     local_descs_data = []
     remote_descs_data = []
     open_fds = []
     temp_files = []
 
-    try:
+    # Legacy path: open FDs inside the thread
+    if chunk_fds is None:
         for idx, fname in zip(chunk_indices, chunk_fnames):
             temp_fname = f"{STORAGE_PATH}/temp_block_{idx}.bin"
             temp_files.append((temp_fname, fname))
             fd = _open_o_direct(temp_fname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
             open_fds.append(fd)
+    else:
+        # Pre-open path: use FDs handed off from the main thread
+        open_fds = list(chunk_fds)
+        temp_files = list(zip(chunk_temp_names, chunk_fnames))
 
+    try:
+        for idx, fd in zip(chunk_indices, open_fds):
             block_addr = buffer_addr + (idx * block_size)
             local_descs_data.append((block_addr, block_size, 0))
             remote_descs_data.append((0, block_size, fd, ""))
@@ -191,7 +206,10 @@ def _write_chunk(agent, agent_name, block_size, buffer_addr, chunk_indices, chun
             os.rename(temp_fname, final_fname)
     except:
         for fd in open_fds:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
     finally:
         if 'xfer_handle' in locals():
             agent.release_xfer_handle(xfer_handle)
@@ -203,6 +221,12 @@ def nixl_write_blocks(block_size, buffer, blocks_indices, file_names):
     """
     Writes discrete blocks from a CPU buffer to files as fast as possible.
     Uses a persistent agent and splits work across _nixl_num_threads threads.
+
+    When config.NIXL_PREOPEN_FDS is True (default), all temp FDs are opened
+    sequentially in the main thread before any worker is dispatched, mirroring
+    the python_impl approach and avoiding per-thread O_CREAT directory-inode
+    contention. Set NIXL_PREOPEN_FDS=False to revert to the legacy behavior
+    where each worker thread opens its own FDs.
     """
     start = time.perf_counter()
 
@@ -213,15 +237,31 @@ def nixl_write_blocks(block_size, buffer, blocks_indices, file_names):
     # Split into contiguous chunks of _NIXL_IOS_PER_CHUNK, round-robin across threads
     chunks, fname_chunks = _distribute_blocks(blocks_indices, file_names, n)
 
+    fd_chunks = temp_chunks = None
+    if config.NIXL_PREOPEN_FDS:
+        # Pre-open all temp FDs sequentially in the main thread (python_impl approach)
+        temp_names = [f"{STORAGE_PATH}/temp_block_{i}.bin" for i in blocks_indices]
+        fds = [_open_o_direct(t, os.O_CREAT | os.O_WRONLY | os.O_TRUNC) for t in temp_names]
+        # Build matching fd/temp-name chunks using the same block-index mapping
+        idx_to_fd_tmp = {idx: (fd, tmp) for idx, fd, tmp in zip(blocks_indices, fds, temp_names)}
+        fd_chunks   = [[idx_to_fd_tmp[idx][0] for idx in chunk] for chunk in chunks]
+        temp_chunks = [[idx_to_fd_tmp[idx][1] for idx in chunk] for chunk in chunks]
+
     if n == 1:
         pool_name, pool_agent = _write_agent_pool[0]
-        _write_chunk(pool_agent, pool_name, block_size, buffer_addr, chunks[0], fname_chunks[0])
+        _write_chunk(pool_agent, pool_name, block_size, buffer_addr,
+                     chunks[0], fname_chunks[0],
+                     fd_chunks[0] if fd_chunks else None,
+                     temp_chunks[0] if temp_chunks else None)
     else:
         n = _resolve_split_threads(n)
         executor = _get_executor(n)
         futures = [
             executor.submit(_write_chunk, _write_agent_pool[i][1], _write_agent_pool[i][0],
-                            block_size, buffer_addr, chunks[i], fname_chunks[i])
+                            block_size, buffer_addr,
+                            chunks[i], fname_chunks[i],
+                            fd_chunks[i] if fd_chunks else None,
+                            temp_chunks[i] if temp_chunks else None)
             for i in range(n) if chunks[i]
         ]
         for f in futures:

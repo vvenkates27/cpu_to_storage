@@ -4,7 +4,7 @@ import statistics
 import random
 import argparse
 
-from utils.config import STORAGE_PATH, CLUSTER, set_o_direct, set_nixl_use_uring, set_nixl_gds_mt_threads, set_no_rename
+from utils.config import STORAGE_PATH, CLUSTER, set_o_direct, set_nixl_use_uring, set_nixl_gds_mt_threads, set_no_rename, set_nixl_preopen_fds
 from backends.nixl_backend import set_nixl_io_backend
 from utils.file_utils import generate_dest_file_names, clean_files, write_blocks
 from utils.benchmark_core import (
@@ -470,6 +470,12 @@ if __name__ == "__main__":
         default=False,
         help='Skip atomic publish (temp+rename or O_TMPFILE+linkat) and write directly to the destination file. Applies to cpp and nixl backends.'
     )
+    parser.add_argument(
+        '--nixl-no-preopen-fds',
+        action='store_true',
+        default=False,
+        help='Revert to legacy NIXL write behavior: each worker thread opens its own FDs instead of pre-opening them in the main thread. Only applies to the nixl backend.'
+    )
 
     args = parser.parse_args()
 
@@ -487,6 +493,8 @@ if __name__ == "__main__":
         set_nixl_use_uring(args.nixl_use_uring)
         if args.nixl_backend == 'GDS_MT' and args.nixl_gds_threads is not None:
             set_nixl_gds_mt_threads(args.nixl_gds_threads)
+        if args.nixl_no_preopen_fds:
+            set_nixl_preopen_fds(False)
 
     # Clean up any leftover files from previous runs
     print("="*80)
@@ -530,6 +538,7 @@ if __name__ == "__main__":
         if args.nixl_backend == 'GDS_MT':
             gds_threads_str = str(args.nixl_gds_threads) if args.nixl_gds_threads is not None else "default (hw_concurrency/2)"
             print(f"GDS_MT Threads:  {gds_threads_str}")
+        print(f"NIXL Pre-open:   {'disabled (legacy)' if args.nixl_no_preopen_fds else 'enabled'}")
 
     if args.mode == 'blocks':
         print(f"Num Blocks:      {args.num_blocks}")

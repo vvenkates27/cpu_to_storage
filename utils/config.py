@@ -72,6 +72,13 @@ def get_nixl_gds_mt_threads() -> int:
 # directly to the final filename. Useful for measuring rename overhead.
 NO_RENAME: bool = False
 
+# Whether to pre-open all temp FDs sequentially in the main thread before
+# dispatching NIXL worker threads (python_impl approach). When True, all
+# O_CREAT opens are serialized in the caller, avoiding per-thread directory-inode
+# contention. Set to False to revert to the legacy behavior where each worker
+# thread opens its own FDs.
+NIXL_PREOPEN_FDS: bool = True
+
 
 def set_no_rename(enabled: bool) -> None:
     global NO_RENAME
@@ -80,3 +87,12 @@ def set_no_rename(enabled: bool) -> None:
 
 def get_no_rename() -> bool:
     return NO_RENAME
+
+
+def set_nixl_preopen_fds(enabled: bool) -> None:
+    global NIXL_PREOPEN_FDS
+    NIXL_PREOPEN_FDS = enabled
+
+
+def get_nixl_preopen_fds() -> bool:
+    return NIXL_PREOPEN_FDS
