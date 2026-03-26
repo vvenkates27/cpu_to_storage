@@ -300,7 +300,7 @@ bool cpp_write_blocks(torch::Tensor buffer,
 // Probe whether O_TMPFILE is usable on dir_path.
 static bool probe_tmpfile(const std::string& dir_path) {
 #ifdef O_TMPFILE
-  int fd = open(dir_path.c_str(), O_TMPFILE | O_WRONLY);
+  int fd = open(dir_path.c_str(), O_TMPFILE | O_WRONLY, 0600);
   if (fd >= 0) { close(fd); return true; }
 #endif
   (void)dir_path;
@@ -335,10 +335,10 @@ open_files_write(std::vector<std::string> final_paths,
       futures.push_back(pool.enqueue([&storage_path, use_o_direct]() -> int {
         int flags = O_TMPFILE | O_WRONLY;
         if (use_o_direct) {
-          int fd = open(storage_path.c_str(), flags | O_DIRECT);
+          int fd = open(storage_path.c_str(), flags | O_DIRECT, 0600);
           if (fd >= 0 || errno != EINVAL) return fd;
         }
-        return open(storage_path.c_str(), flags);
+        return open(storage_path.c_str(), flags, 0600);
       }));
     }
     for (size_t i = 0; i < n; i++) {
